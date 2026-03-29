@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 ClawPowers Commerce. All Rights Reserved.
+// See LICENSE in the repository root for license information.
+
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   validateAgentJWT,
@@ -121,7 +125,7 @@ describe('validateAgentJWT', () => {
     await validateAgentJWT(token, publicKeys);
 
     // Second with same nonce fails
-    // Must clear and re-sign with same nonce to bypass expiry but re-use nonce
+    // Must clear and re-sign with same nonce to bypass expiry but reuse nonce
     const token2 = await signAgentJWT(payload, keyPair.privateKey);
     await expect(validateAgentJWT(token2, publicKeys)).rejects.toMatchObject({
       code: 'REPLAY_ATTACK',

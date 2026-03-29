@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 ClawPowers Commerce. All Rights Reserved.
+// See LICENSE in the repository root for license information.
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { AgentGuard } from '../src/guard.js';
 import { StaticProvider } from '@clawpowers/core';
@@ -23,7 +27,7 @@ describe('AgentGuard.evaluate()', () => {
     vi.useRealTimers();
   });
 
-  function makeGuard(overrides: Parameters<typeof AgentGuard>[0] = {}) {
+  function makeGuard(overrides: ConstructorParameters<typeof AgentGuard>[0] = {}) {
     return new AgentGuard({
       jwt: {
         publicKeys: new Map([['__default__', pubKeyB64]]),

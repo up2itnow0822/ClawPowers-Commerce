@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 ClawPowers Commerce. All Rights Reserved.
+// See LICENSE in the repository root for license information.
+
 /**
  * JWT validation using native Web Crypto API (zero dependencies).
  * Supports EdDSA (Ed25519) signed tokens.

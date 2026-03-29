@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 ClawPowers Commerce. All Rights Reserved.
+// See LICENSE in the repository root for license information.
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AgentGuard } from '../../src/guard.js';
 import {
@@ -62,7 +66,6 @@ describe('guard.express() middleware', () => {
     });
 
     const middleware = guard.express();
-    // @ts-expect-error minimal mock
     await middleware(req, res, next);
 
     expect(next).toHaveBeenCalledOnce();
@@ -76,7 +79,6 @@ describe('guard.express() middleware', () => {
   it('responds 401 with challenge body when no JWT', async () => {
     const { req, res, next } = makeMockExpressContext({});
     const middleware = guard.express();
-    // @ts-expect-error minimal mock
     await middleware(req, res, next);
 
     expect(res._status).toBe(401);
@@ -104,7 +106,6 @@ describe('guard.express() middleware', () => {
     });
 
     const middleware = blockGuard.express();
-    // @ts-expect-error minimal mock
     await middleware(req, res, next);
 
     expect(res._status).toBe(403);
@@ -124,7 +125,6 @@ describe('guard.express() middleware', () => {
     const payload1 = makePayload({ nonce: crypto.randomUUID() });
     const token1 = await makeToken(payload1, keyPair.privateKey);
     const ctx1 = makeMockExpressContext({ authorization: `Bearer ${token1}` });
-    // @ts-expect-error minimal mock
     await middleware(ctx1.req, ctx1.res, ctx1.next);
     expect(ctx1.next).toHaveBeenCalledOnce();
 
@@ -132,7 +132,6 @@ describe('guard.express() middleware', () => {
     const payload2 = makePayload({ nonce: crypto.randomUUID() });
     const token2 = await makeToken(payload2, keyPair.privateKey);
     const ctx2 = makeMockExpressContext({ authorization: `Bearer ${token2}` });
-    // @ts-expect-error minimal mock
     await middleware(ctx2.req, ctx2.res, ctx2.next);
 
     expect(ctx2.res._status).toBe(429);
