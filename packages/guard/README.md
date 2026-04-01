@@ -2,6 +2,8 @@
 
 > Agent identity middleware with route-based reputation tiers for Express, Cloudflare Workers, and Next.js.
 
+> **Patent Pending** — Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents
+
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-blue.svg)](../../LICENSE)
 
 ## Installation
