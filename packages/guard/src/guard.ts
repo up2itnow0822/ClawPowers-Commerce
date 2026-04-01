@@ -3,7 +3,7 @@
 // See LICENSE in the repository root for license information.
 
 /**
- * AgentGuard — core agent access control class.
+ * AgentGuard — core agent access control class with route-based reputation tiers.
  */
 
 import { z } from 'zod';
@@ -14,12 +14,14 @@ import {
   HOLProvider,
   ERC8004Provider,
   StaticProvider,
+  matchGlob,
 } from '@clawpowers/core';
 import type {
   AgentIdentityPayload,
   PolicyDecision,
   ReputationScore,
   ReputationProvider,
+  RoutePolicy,
 } from '@clawpowers/core';
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -43,6 +45,8 @@ export interface GuardResult {
     remaining: number;
     resetMs: number;
   };
+  /** Matched route pattern, if any */
+  matchedRoute?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -50,6 +54,8 @@ export interface GuardResult {
 // ──────────────────────────────────────────────────────────────────────────────
 
 export interface GuardConfig {
+  /** Route-based reputation thresholds (glob pattern → policy) */
+  routes?: Record<string, RoutePolicy>;
   policy: {
     allowVerified: boolean;
     allowUnverified: 'challenge' | 'deny';
@@ -57,6 +63,7 @@ export interface GuardConfig {
     allowList: string[];
   };
   reputation: {
+    /** Global minimum score (used when no route match). 0 = disabled. */
     minScore: number;
     provider: 'hol' | 'erc8004' | 'static' | ReputationProvider;
     cacheTtlMs: number;
@@ -82,6 +89,7 @@ export interface GuardConfig {
 }
 
 const defaultConfig: GuardConfig = {
+  routes: undefined,
   policy: {
     allowVerified: true,
     allowUnverified: 'challenge',
@@ -110,7 +118,20 @@ const defaultConfig: GuardConfig = {
 
 /**
  * AgentGuard — evaluates incoming requests against agent identity,
- * reputation, and rate-limit policies.
+ * reputation, and rate-limit policies with route-based reputation tiers.
+ *
+ * @example
+ * ```typescript
+ * const guard = new AgentGuard({
+ *   routes: {
+ *     '/api/browse/*':   { minReputation: 0 },   // anyone
+ *     '/api/interact/*': { minReputation: 25 },  // known agents
+ *     '/api/transact/*': { minReputation: 50 },  // trusted agents
+ *     '/api/premium/*':  { minReputation: 75 },  // premium agents
+ *   },
+ *   jwt: { publicKeys: new Map([['__default__', publicKeyBase64]]) },
+ * });
+ * ```
  */
 export class AgentGuard {
   private readonly config: GuardConfig;
@@ -203,39 +224,142 @@ export class AgentGuard {
       };
     }
 
-    // 3. Look up reputation (with cache)
+    // 3. Match route and determine reputation threshold
+    const matchedRoute = this.matchRoute(req.url);
+    const routePolicy = matchedRoute
+      ? this.config.routes![matchedRoute]
+      : undefined;
+    const minReputation = routePolicy?.minReputation ?? this.config.reputation.minScore;
+
+    // 4. Look up reputation if threshold > 0
     let reputation: ReputationScore | null = null;
-    if (agent && this.config.reputation.minScore > 0) {
+    if (agent && minReputation > 0) {
       reputation = await this.getReputation(agent.agentId);
     }
 
-    // 4. Run policy engine
-    const decision = this.policyEngine.evaluate(agent, reputation, {
-      allowVerified: this.config.policy.allowVerified,
-      allowUnverified: this.config.policy.allowUnverified,
-      blockList: this.config.policy.blockList,
-      allowList: this.config.policy.allowList,
-      minReputationScore: this.config.reputation.minScore,
-    });
-
-    // 5. Logging
-    if (decision === 'allow' && agent && this.config.logging.onAllow) {
-      this.config.logging.onAllow(agent, request);
-    } else if (decision === 'deny' && this.config.logging.onDeny) {
-      this.config.logging.onDeny('policy deny', request);
-    } else if (decision === 'challenge' && this.config.logging.onChallenge) {
-      this.config.logging.onChallenge(agent, request);
+    // 5. If no agent identity: challenge (401)
+    if (!agent) {
+      const decision = this.config.policy.allowUnverified === 'deny' ? 'deny' : 'challenge';
+      if (decision === 'challenge' && this.config.logging.onChallenge) {
+        this.config.logging.onChallenge(null, request);
+      } else if (decision === 'deny' && this.config.logging.onDeny) {
+        this.config.logging.onDeny('unverified agent', request);
+      }
+      return {
+        decision,
+        agent: null,
+        reputation: null,
+        rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+        matchedRoute: matchedRoute ?? undefined,
+      };
     }
 
+    // 6. Check allow/block lists
+    if (
+      this.config.policy.allowList.length > 0 &&
+      this.config.policy.allowList.some((p) => matchGlob(p, agent!.operatorId))
+    ) {
+      if (this.config.logging.onAllow) this.config.logging.onAllow(agent, request);
+      return {
+        decision: 'allow',
+        agent,
+        reputation,
+        rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+        matchedRoute: matchedRoute ?? undefined,
+      };
+    }
+
+    if (
+      this.config.policy.blockList.length > 0 &&
+      this.config.policy.blockList.some((p) => matchGlob(p, agent!.operatorId))
+    ) {
+      if (this.config.logging.onDeny) this.config.logging.onDeny('blocked operator', request);
+      return {
+        decision: 'deny',
+        agent,
+        reputation,
+        rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+        matchedRoute: matchedRoute ?? undefined,
+      };
+    }
+
+    if (!this.config.policy.allowVerified) {
+      if (this.config.logging.onDeny) this.config.logging.onDeny('verified agents not allowed', request);
+      return {
+        decision: 'deny',
+        agent,
+        reputation,
+        rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+        matchedRoute: matchedRoute ?? undefined,
+      };
+    }
+
+    // 7. Check reputation threshold — deny (403) if agent is known but reputation too low
+    if (minReputation > 0) {
+      if (!reputation || reputation.score < minReputation) {
+        if (this.config.logging.onDeny) {
+          this.config.logging.onDeny(
+            `reputation ${reputation?.score ?? 'unknown'} below threshold ${minReputation}`,
+            request,
+          );
+        }
+        return {
+          decision: 'deny',
+          agent,
+          reputation,
+          rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+          matchedRoute: matchedRoute ?? undefined,
+        };
+      }
+    }
+
+    // 8. Allow
+    if (this.config.logging.onAllow) this.config.logging.onAllow(agent, request);
     return {
-      decision,
+      decision: 'allow',
       agent,
       reputation,
-      rateLimit: {
-        remaining: rlResult.remaining,
-        resetMs: rlResult.resetMs,
-      },
+      rateLimit: { remaining: rlResult.remaining, resetMs: rlResult.resetMs },
+      matchedRoute: matchedRoute ?? undefined,
     };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Route matching
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Match a URL path against configured routes.
+   * Returns the most specific (longest) matching route pattern, or null.
+   */
+  private matchRoute(url: string): string | null {
+    if (!this.config.routes) return null;
+
+    // Extract pathname from URL
+    let pathname: string;
+    try {
+      // Handle full URLs
+      const parsed = new URL(url, 'http://localhost');
+      pathname = parsed.pathname;
+    } catch {
+      pathname = url.split('?')[0] ?? url;
+    }
+
+    let bestMatch: string | null = null;
+    let bestLength = -1;
+
+    for (const pattern of Object.keys(this.config.routes)) {
+      if (matchGlob(pattern, pathname)) {
+        // Prefer longest (most specific) match
+        const specificity = pattern.replace(/\*/g, '').length;
+        if (specificity > bestLength) {
+          bestMatch = pattern;
+          bestLength = specificity;
+        }
+      }
+    }
+
+    return bestMatch;
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -264,7 +388,14 @@ export class AgentGuard {
           next();
           break;
         case 'deny':
-          res.status(403).json({ error: 'Forbidden', reason: 'Access denied by policy' });
+          res.status(403).json({
+            error: 'Forbidden',
+            reason: 'Access denied by policy',
+            ...(result.reputation !== null && {
+              reputation: result.reputation.score,
+              required: this.getMinReputation(result.matchedRoute),
+            }),
+          });
           break;
         case 'challenge':
           res.status(401).json(this.buildChallengeBody(result.agent));
@@ -301,7 +432,14 @@ export class AgentGuard {
           return null;
         case 'deny':
           return new Response(
-            JSON.stringify({ error: 'Forbidden', reason: 'Access denied by policy' }),
+            JSON.stringify({
+              error: 'Forbidden',
+              reason: 'Access denied by policy',
+              ...(result.reputation !== null && {
+                reputation: result.reputation.score,
+                required: this.getMinReputation(result.matchedRoute),
+              }),
+            }),
             { status: 403, headers: { 'Content-Type': 'application/json' } },
           );
         case 'challenge':
@@ -345,16 +483,20 @@ export class AgentGuard {
         case 'allow': {
           const response = NextResponse.next();
           if (result.agent) {
-            response.headers.set(
-              'X-Agent-Id',
-              result.agent.agentId,
-            );
+            response.headers.set('X-Agent-Id', result.agent.agentId);
           }
           return response;
         }
         case 'deny':
           return NextResponse.json(
-            { error: 'Forbidden', reason: 'Access denied by policy' },
+            {
+              error: 'Forbidden',
+              reason: 'Access denied by policy',
+              ...(result.reputation !== null && {
+                reputation: result.reputation.score,
+                required: this.getMinReputation(result.matchedRoute),
+              }),
+            },
             { status: 403 },
           );
         case 'challenge':
@@ -473,11 +615,21 @@ export class AgentGuard {
     }
   }
 
+  private getMinReputation(matchedRoute?: string): number {
+    if (matchedRoute && this.config.routes?.[matchedRoute]) {
+      return this.config.routes[matchedRoute].minReputation;
+    }
+    return this.config.reputation.minScore;
+  }
+
   private buildChallengeBody(agent: AgentIdentityPayload | null): Record<string, unknown> {
     const body: Record<string, unknown> = {
       error: 'Challenge Required',
       challenge: {
         type: this.config.challenge?.type ?? 'pow',
+        nonce: crypto.randomUUID(),
+        endpoint: '/.well-known/agent-challenge',
+        expiresAt: Date.now() + 300_000,
       },
     };
     if (this.config.challenge?.difficulty !== undefined) {
@@ -489,6 +641,58 @@ export class AgentGuard {
     }
     return body;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Standalone adapter functions
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create an Express/Connect middleware from an AgentGuard instance.
+ *
+ * @example
+ * ```typescript
+ * import { AgentGuard, expressAdapter } from '@clawpowers/guard';
+ * const guard = new AgentGuard({ ... });
+ * app.use(expressAdapter(guard));
+ * ```
+ */
+export function expressAdapter(
+  guard: AgentGuard,
+): (req: ExpressRequest, res: ExpressResponse, next: () => void) => Promise<void> {
+  return guard.express();
+}
+
+/**
+ * Create a Cloudflare Workers fetch handler from an AgentGuard instance.
+ *
+ * @example
+ * ```typescript
+ * import { AgentGuard, workersAdapter } from '@clawpowers/guard';
+ * const guard = new AgentGuard({ ... });
+ * const handler = workersAdapter(guard);
+ * ```
+ */
+export function workersAdapter(
+  guard: AgentGuard,
+): (request: Request) => Promise<Response | null> {
+  return guard.worker();
+}
+
+/**
+ * Create a Next.js App Router middleware from an AgentGuard instance.
+ *
+ * @example
+ * ```typescript
+ * import { AgentGuard, nextAdapter } from '@clawpowers/guard';
+ * const guard = new AgentGuard({ ... });
+ * export const middleware = nextAdapter(guard);
+ * ```
+ */
+export function nextAdapter(
+  guard: AgentGuard,
+): (request: NextRequest) => Promise<NextResponse> {
+  return guard.nextjs();
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

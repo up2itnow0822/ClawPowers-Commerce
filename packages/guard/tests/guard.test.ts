@@ -188,7 +188,7 @@ describe('AgentGuard.evaluate()', () => {
     expect(r3.rateLimit.resetMs).toBeGreaterThan(0);
   });
 
-  it('enforces reputation threshold', async () => {
+  it('denies when reputation is below threshold (403)', async () => {
     const staticProvider = new StaticProvider({ 'gpt-agent-001': 30 });
 
     const guard = makeGuard({
@@ -208,7 +208,9 @@ describe('AgentGuard.evaluate()', () => {
       url: '/',
     });
 
-    expect(result.decision).toBe('challenge');
+    // Agent is identified but reputation too low → deny (403), not challenge (401)
+    expect(result.decision).toBe('deny');
+    expect(result.agent).not.toBeNull();
   });
 
   it('allows when reputation score meets threshold', async () => {
@@ -303,6 +305,171 @@ describe('AgentGuard.evaluate()', () => {
     // @ts-expect-error intentionally bad
     const result = await guard.evaluate({ bad: 'data' });
     expect(result.decision).toBe('deny');
+  });
+
+  // ── Route-based reputation tier tests ──────────────────────────────────
+
+  it('allows any agent on browse route (minReputation: 0)', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/interact/*': { minReputation: 25 },
+        '/api/transact/*': { minReputation: 50 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+      reputation: { minScore: 0, provider: new StaticProvider({}, 10), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'GET',
+      url: '/api/browse/products',
+    });
+
+    expect(result.decision).toBe('allow');
+    expect(result.matchedRoute).toBe('/api/browse/*');
+  });
+
+  it('denies agent with low reputation on interact route', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/interact/*': { minReputation: 25 },
+        '/api/transact/*': { minReputation: 50 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+      reputation: { minScore: 0, provider: new StaticProvider({ 'gpt-agent-001': 10 }), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'POST',
+      url: '/api/interact/chat',
+    });
+
+    expect(result.decision).toBe('deny');
+    expect(result.matchedRoute).toBe('/api/interact/*');
+  });
+
+  it('allows agent with sufficient reputation on transact route', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/interact/*': { minReputation: 25 },
+        '/api/transact/*': { minReputation: 50 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+      reputation: { minScore: 0, provider: new StaticProvider({ 'gpt-agent-001': 60 }), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'POST',
+      url: '/api/transact/order',
+    });
+
+    expect(result.decision).toBe('allow');
+    expect(result.matchedRoute).toBe('/api/transact/*');
+  });
+
+  it('denies agent below premium threshold', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/interact/*': { minReputation: 25 },
+        '/api/transact/*': { minReputation: 50 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+      reputation: { minScore: 0, provider: new StaticProvider({ 'gpt-agent-001': 60 }), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'GET',
+      url: '/api/premium/analytics',
+    });
+
+    expect(result.decision).toBe('deny');
+    expect(result.matchedRoute).toBe('/api/premium/*');
+  });
+
+  it('allows premium agent on premium route', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+      reputation: { minScore: 0, provider: new StaticProvider({ 'gpt-agent-001': 90 }), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'GET',
+      url: '/api/premium/data',
+    });
+
+    expect(result.decision).toBe('allow');
+  });
+
+  it('challenges unidentified agent on any route (401)', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+        '/api/premium/*': { minReputation: 75 },
+      },
+    });
+
+    const result = await guard.evaluate({
+      headers: {},
+      method: 'GET',
+      url: '/api/premium/data',
+    });
+
+    expect(result.decision).toBe('challenge');
+    expect(result.agent).toBeNull();
+  });
+
+  it('falls back to global minScore for unmatched routes', async () => {
+    const guard = new AgentGuard({
+      jwt: { publicKeys: new Map([['__default__', pubKeyB64]]) },
+      routes: {
+        '/api/browse/*': { minReputation: 0 },
+      },
+      reputation: { minScore: 50, provider: new StaticProvider({ 'gpt-agent-001': 30 }), cacheTtlMs: 300000 },
+    });
+
+    const payload = makePayload();
+    const token = await makeToken(payload, keyPair.privateKey);
+
+    const result = await guard.evaluate({
+      headers: { authorization: `Bearer ${token}` },
+      method: 'GET',
+      url: '/api/other/endpoint',
+    });
+
+    expect(result.decision).toBe('deny');
+    expect(result.matchedRoute).toBeUndefined();
   });
 
   it('filters by issuerAllowList', async () => {

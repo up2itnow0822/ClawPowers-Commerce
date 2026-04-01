@@ -11,6 +11,9 @@ export type {
   PolicyRule,
   ReputationScore,
   AgentProfile,
+  RoutePolicy,
+  ReputationThreshold,
+  AgentChallenge,
 } from './types.js';
 
 // JWT utilities

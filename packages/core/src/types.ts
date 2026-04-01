@@ -76,6 +76,41 @@ export interface ReputationScore {
   lastUpdated: number;
 }
 
+/** Route-level policy for reputation-based access control */
+export interface RoutePolicy {
+  /** Minimum reputation score required (0-100) */
+  minReputation: number;
+  /** Optional rate limit override for this route */
+  rateLimit?: {
+    windowMs: number;
+    maxRequests: number;
+  };
+}
+
+/** Reputation threshold tier */
+export interface ReputationThreshold {
+  /** Tier name */
+  name: string;
+  /** Minimum reputation score */
+  minScore: number;
+  /** Description of what this tier grants */
+  description: string;
+}
+
+/** Challenge issued to unidentified agents */
+export interface AgentChallenge {
+  /** Challenge type */
+  type: 'pow' | 'captcha' | 'redirect';
+  /** Challenge difficulty (for PoW) */
+  difficulty?: number;
+  /** Challenge nonce */
+  nonce: string;
+  /** Challenge endpoint to submit response */
+  endpoint: string;
+  /** Expiration timestamp (ms) */
+  expiresAt: number;
+}
+
 /** Full profile combining identity, reputation, and rate-limit state */
 export interface AgentProfile {
   /** Verified identity payload, or null if unverified */
