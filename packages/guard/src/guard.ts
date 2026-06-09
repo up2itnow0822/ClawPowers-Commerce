@@ -459,12 +459,13 @@ export class AgentGuard {
             },
           );
       }
+      return null;
     };
   }
 
   /** Returns a Next.js App Router middleware function */
-  nextjs(): (request: NextRequest) => Promise<NextResponse> {
-    return async (request: NextRequest): Promise<NextResponse> => {
+  nextjs(): (request: NextRequest) => Promise<NextMiddlewareResponse> {
+    return async (request: NextRequest): Promise<NextMiddlewareResponse> => {
       const headers: Record<string, string> = {};
       request.headers.forEach((value: string, key: string) => {
         headers[key.toLowerCase()] = value;
@@ -480,41 +481,27 @@ export class AgentGuard {
       const result = await this.evaluate(guardReq);
 
       switch (result.decision) {
-        case 'allow': {
-          const response = NextResponse.next();
-          if (result.agent) {
-            response.headers.set('X-Agent-Id', result.agent.agentId);
-          }
-          return response;
-        }
+        case 'allow':
+          return undefined;
         case 'deny':
-          return NextResponse.json(
-            {
-              error: 'Forbidden',
-              reason: 'Access denied by policy',
-              ...(result.reputation !== null && {
-                reputation: result.reputation.score,
-                required: this.getMinReputation(result.matchedRoute),
-              }),
-            },
-            { status: 403 },
-          );
+          return jsonResponse({
+            error: 'Forbidden',
+            reason: 'Access denied by policy',
+            ...(result.reputation !== null && {
+              reputation: result.reputation.score,
+              required: this.getMinReputation(result.matchedRoute),
+            }),
+          }, 403);
         case 'challenge':
-          return NextResponse.json(
-            this.buildChallengeBody(result.agent),
-            { status: 401 },
-          );
+          return jsonResponse(this.buildChallengeBody(result.agent), 401);
         case 'rate-limit':
-          return NextResponse.json(
+          return jsonResponse(
             { error: 'Too Many Requests', retryAfterMs: result.rateLimit.resetMs },
-            {
-              status: 429,
-              headers: {
-                'Retry-After': String(Math.ceil(result.rateLimit.resetMs / 1000)),
-              },
-            },
+            429,
+            { 'Retry-After': String(Math.ceil(result.rateLimit.resetMs / 1000)) },
           );
       }
+      return undefined;
     };
   }
 
@@ -691,7 +678,7 @@ export function workersAdapter(
  */
 export function nextAdapter(
   guard: AgentGuard,
-): (request: NextRequest) => Promise<NextResponse> {
+): (request: NextRequest) => Promise<NextMiddlewareResponse> {
   return guard.nextjs();
 }
 
@@ -720,40 +707,7 @@ interface NextRequest {
   url: string;
 }
 
-/** Minimal NextResponse shim */
-interface NextResponse {
-  headers: { set(key: string, value: string): void };
-}
-
-// In real Next.js this is imported from 'next/server'.
-// We declare a compatible shape here so guard compiles without that dep.
-const NextResponse = {
-  next(): NextResponseWithHeaders {
-    return {
-      headers: {
-        set(_key: string, _value: string) {},
-      },
-    };
-  },
-  json(
-    body: unknown,
-    init?: { status?: number; headers?: Record<string, string> },
-  ): NextResponseWithHeaders {
-    return {
-      body,
-      status: init?.status ?? 200,
-      headers: {
-        set(_key: string, _value: string) {},
-        ...init?.headers,
-      },
-    };
-  },
-} as const;
-
-interface NextResponseWithHeaders extends NextResponse {
-  body?: unknown;
-  status?: number;
-}
+type NextMiddlewareResponse = Response | undefined;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Key import helper
@@ -817,4 +771,18 @@ function flattenHeaders(
     }
   }
   return flat;
+}
+
+function jsonResponse(
+  body: unknown,
+  status: number,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  });
 }
