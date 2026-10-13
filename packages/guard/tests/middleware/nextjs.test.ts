@@ -2,7 +2,7 @@
 // Copyright (c) 2026 ClawPowers Commerce. All Rights Reserved.
 // See LICENSE in the repository root for license information.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AgentGuard, nextAdapter } from '../../src/guard.js';
 import {
   makeKeyPair,
@@ -78,6 +78,45 @@ describe('guard.nextjs() middleware', () => {
     await expect(response?.json()).resolves.toMatchObject({
       error: 'Forbidden',
       reason: 'Access denied by policy',
+    });
+  });
+
+  it.each([
+    { resetMs: 0, retryAfter: '0' },
+    { resetMs: 1, retryAfter: '1' },
+    { resetMs: 999, retryAfter: '1' },
+    { resetMs: 1000, retryAfter: '1' },
+    { resetMs: 1001, retryAfter: '2' },
+    { resetMs: 60001, retryAfter: '61' },
+  ])('returns 429 and Retry-After=$retryAfter for resetMs=$resetMs', async ({ resetMs, retryAfter }) => {
+    const evaluate = vi.spyOn(guard, 'evaluate').mockResolvedValue({
+      decision: 'rate-limit',
+      agent: null,
+      reputation: null,
+      rateLimit: { remaining: 0, resetMs },
+    });
+    const middleware = nextAdapter(guard);
+    const request = new Request('https://shop.example.com/api/products', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': '192.0.2.10', 'X-Test-Case': 'rate-limit' },
+    });
+
+    const response = await middleware(request);
+
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect(evaluate).toHaveBeenCalledWith({
+      headers: { 'x-forwarded-for': '192.0.2.10', 'x-test-case': 'rate-limit' },
+      ip: '192.0.2.10',
+      method: 'POST',
+      url: 'https://shop.example.com/api/products',
+    });
+    expect(response).toBeInstanceOf(Response);
+    expect(response?.status).toBe(429);
+    expect(response?.headers.get('Retry-After')).toBe(retryAfter);
+    expect(response?.headers.get('Content-Type')).toContain('application/json');
+    await expect(response?.json()).resolves.toEqual({
+      error: 'Too Many Requests',
+      retryAfterMs: resetMs,
     });
   });
 });
