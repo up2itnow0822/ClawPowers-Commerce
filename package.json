@@ -13,6 +13,8 @@
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.57.2",
     "@typescript-eslint/parser": "^8.57.2",
-    "typescript-eslint": "^8.57.2"
+    "typescript-eslint": "^8.57.2",
+    "vite": "^6.4.0",
+    "vitest": "5.1.0"
   }
 }
